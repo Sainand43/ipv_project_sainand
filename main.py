@@ -4,6 +4,7 @@ import csv
 import numpy as np
 from datetime import datetime
 import time
+import re
 
 class SimpleAttendanceSystem:
     def __init__(self):
@@ -21,6 +22,7 @@ class SimpleAttendanceSystem:
         # Load student images and create face recognizer
         self.recognizer = cv2.face.LBPHFaceRecognizer_create()
         self.student_ids = {}
+        self.student_name_map = {}  # Maps student IDs to actual names (without numbers)
         self.load_student_images()
         
         # Track attendance to avoid duplicates
@@ -31,6 +33,19 @@ class SimpleAttendanceSystem:
         self.attendance_file = os.path.join(self.attendance_folder, f"attendance_{self.today}.csv")
         self.initialize_attendance_file()
     
+    def extract_student_name(self, filename):
+        """Extract the base student name without numbers."""
+        # Remove file extension
+        name_without_ext = os.path.splitext(filename)[0]
+        
+        # Extract the name part (remove trailing numbers)
+        # This regex matches a string that ends with one or more digits
+        match = re.match(r'([a-zA-Z_]+)(\d+)$', name_without_ext)
+        if match:
+            return match.group(1)  # Return the name part only
+        
+        return name_without_ext  # Return original name if no numbers found
+    
     def load_student_images(self):
         """Load student images and train the face recognizer."""
         print("Loading student images...")
@@ -38,16 +53,24 @@ class SimpleAttendanceSystem:
         faces = []
         ids = []
         id_counter = 0
+        student_names_seen = {}  # Track which student names we've seen
         
         for filename in os.listdir(self.students_folder):
             if filename.endswith(('.png', '.jpg', '.jpeg')):
-                student_name = os.path.splitext(filename)[0]
+                # Extract the student name without the number suffix
+                student_name_with_num = os.path.splitext(filename)[0]
+                student_name = self.extract_student_name(filename)
+                
                 image_path = os.path.join(self.students_folder, filename)
                 
-                # Map student name to ID
-                if student_name not in self.student_ids:
+                # Create or get the student ID
+                if student_name not in student_names_seen:
                     id_counter += 1
+                    student_names_seen[student_name] = id_counter
                     self.student_ids[id_counter] = student_name
+                    print(f"Registering new student: {student_name}")
+                
+                student_id = student_names_seen[student_name]
                 
                 # Load image and convert to grayscale
                 img = cv2.imread(image_path)
@@ -62,15 +85,12 @@ class SimpleAttendanceSystem:
                 
                 for (x, y, w, h) in detected_faces:
                     faces.append(gray[y:y+h, x:x+w])
-                    ids.append(id_counter)
-                    print(f"Loaded face for {student_name}")
-        
-        # Reverse the student_ids mapping for easy lookup
-        self.name_to_id = {name: id for id, name in self.student_ids.items()}
+                    ids.append(student_id)
+                    print(f"Loaded face from {student_name_with_num} (ID: {student_id})")
         
         # If faces were found, train the recognizer
         if faces:
-            print(f"Training recognizer with {len(faces)} faces...")
+            print(f"Training recognizer with {len(faces)} faces from {len(student_names_seen)} students...")
             self.recognizer.train(faces, np.array(ids))
             print("Training complete!")
         else:
@@ -128,12 +148,20 @@ class SimpleAttendanceSystem:
         
         print("Starting attendance system. Press 'q' to quit.")
         
+        # Dictionary to track confidence scores for each student
+        student_confidence = {}
+        frame_count = 0
+        confidence_threshold = 50  # Minimum confidence to consider a match
+        frames_to_average = 10  # Number of frames to average confidence over
+        
         while True:
             # Capture frame from webcam
             ret, frame = video_capture.read()
             if not ret:
                 print("Error: Can't receive frame")
                 break
+            
+            frame_count += 1
             
             # Convert to grayscale for face detection
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -152,14 +180,30 @@ class SimpleAttendanceSystem:
                     # Predict the student ID
                     student_id, confidence = self.recognizer.predict(roi_gray)
                     confidence = 100 - int(confidence)
+                    student_name = self.get_student_name(student_id)
                     
-                    # If confidence is high enough, mark attendance
-                    if confidence > 50:
-                        student_name = self.get_student_name(student_id)
+                    # Track confidence for this student
+                    if student_name not in student_confidence:
+                        student_confidence[student_name] = []
+                    
+                    student_confidence[student_name].append(confidence)
+                    
+                    # Keep only the most recent frames worth of confidence scores
+                    if len(student_confidence[student_name]) > frames_to_average:
+                        student_confidence[student_name] = student_confidence[student_name][-frames_to_average:]
+                    
+                    # Calculate average confidence over recent frames
+                    avg_confidence = sum(student_confidence[student_name]) / len(student_confidence[student_name])
+                    
+                    # If average confidence is high enough, mark attendance
+                    if avg_confidence > confidence_threshold and len(student_confidence[student_name]) >= frames_to_average/2:
                         self.mark_attendance(student_name)
-                        display_text = f"{student_name} ({confidence}%)"
+                        display_text = f"{student_name} ({int(avg_confidence)}%)"
                     else:
-                        display_text = f"Unknown ({confidence}%)"
+                        if confidence > confidence_threshold:
+                            display_text = f"{student_name} ({confidence}%)"
+                        else:
+                            display_text = f"Unknown ({confidence}%)"
                     
                     # Display name and confidence
                     cv2.putText(frame, display_text, (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
@@ -222,9 +266,11 @@ class SimpleAttendanceSystem:
                         student_id, confidence = self.recognizer.predict(roi_gray)
                         confidence = 100 - int(confidence)
                         
+                        # Get the student base name (without number)
+                        student_name = self.get_student_name(student_id)
+                        
                         # If confidence is high enough, mark attendance
                         if confidence > 50:
-                            student_name = self.get_student_name(student_id)
                             self.mark_attendance(student_name)
                             display_text = f"{student_name} ({confidence}%)"
                         else:
@@ -251,7 +297,7 @@ def setup_instructions():
     print("   pip install opencv-contrib-python numpy")
     print("\n2. Add student images to the 'data/students/' folder:")
     print("   - Each image should contain only one clear face")
-    print("   - Name the file with the student's name (e.g., john_smith.jpg)")
+    print("   - Name the file with the student's name and number (e.g., sainand1.jpg, sainand2.jpg)")
     print("\n3. For offline testing, add images to 'data/test_images/' folder")
     print("\n4. Run the program again after adding images")
     print("-----------------------------\n")
