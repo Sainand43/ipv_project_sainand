@@ -1,4 +1,4 @@
-import face_recognition
+""" import face_recognition
 import cv2
 import os
 import numpy as np
@@ -10,7 +10,7 @@ class FaceRecognizer:
         self.load_student_images(students_folder)
         
     def load_student_images(self, students_folder):
-        """Load student images from the given folder and encode their faces."""
+        """ """Load student images from the given folder and encode their faces.""" """
         print("Loading student images...")
         for filename in os.listdir(students_folder):
             if filename.endswith(('.png', '.jpg', '.jpeg')):
@@ -31,7 +31,7 @@ class FaceRecognizer:
         print(f"Loaded {len(self.known_face_names)} student faces")
     
     def identify_faces(self, frame):
-        """Identify faces in the given frame and return their names."""
+        """ """Identify faces in the given frame and return their names.""" """
         # Convert the image from BGR color (OpenCV) to RGB color
         rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         
@@ -54,4 +54,4 @@ class FaceRecognizer:
             
             face_names.append(name)
         
-        return face_locations, face_names
+        return face_locations, face_names """
