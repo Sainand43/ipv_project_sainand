@@ -10,6 +10,9 @@ import face_recognition
 from collections import defaultdict
 from sklearn.decomposition import PCA
 import pickle
+import pandas as pd
+import smtplib
+from email.message import EmailMessage
 
 #print(dir(cv2.face))
 # Check for required libraries
@@ -31,6 +34,34 @@ except ImportError:
     print("Facial landmarks will be disabled.")
     print("To install: pip install dlib")
     DLIB_AVAILABLE = False
+
+# Email configuration (set your SMTP server and sender email/password here)
+SMTP_SERVER = 'smtp.gmail.com'
+SMTP_PORT = 587
+SENDER_EMAIL = 'kundaikarsainand@gmail.com'
+SENDER_PASSWORD = 'vsuyvrbnxvktlgmu'  # Use an appvsuyassword if using Gmail
+
+def csv_to_excel(csv_path, excel_path):
+    df = pd.read_csv(csv_path)
+    df.to_excel(excel_path, index=False)
+
+def send_email_with_attachment(to_email, subject, body, attachment_path):
+    msg = EmailMessage()
+    msg['Subject'] = subject
+    msg['From'] = SENDER_EMAIL
+    msg['To'] = to_email
+    msg.set_content(body)
+    # Attach the file
+    with open(attachment_path, 'rb') as f:
+        file_data = f.read()
+        file_name = os.path.basename(attachment_path)
+    msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
+    # Send the email
+    with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.send_message(msg)
+        print(f"Sent attendance to {to_email}")
 
 class EnhancedAttendanceSystem:
     def __init__(self):
@@ -392,43 +423,47 @@ class EnhancedAttendanceSystem:
                 writer.writerow(['Name', 'Time', 'Confidence', 'Method'])
     
     def mark_attendance(self, student_name, confidence=0, method="Unknown"):
-        """Mark attendance for a student based on the current subject."""
+        """Mark attendance for a student based on the current subject, only once per lecture."""
         # Get the current time
         current_time = datetime.now().strftime("%H:%M")
-        
+        today_date = datetime.now().strftime("%Y-%m-%d")
         # Load the timetable
         timetable_file = "timetable.csv"
         if not os.path.exists(timetable_file):
             print("Error: Timetable file not found.")
             return
-        
         with open(timetable_file, 'r') as f:
             reader = csv.DictReader(f)
             for row in reader:
                 start_time = row['start_time']
                 end_time = row['end_time']
                 subject = row['subject']
-                
                 # Check if the current time is within the subject's time range
                 if start_time <= current_time <= end_time:
-                    # Create a separate attendance file for the subject
-                    subject_attendance_file = os.path.join(self.attendance_folder, f"{subject}_attendance.csv")
-                    
+                    # Save as Subjectname_Date_attendance.csv
+                    subject_attendance_file = os.path.join(self.attendance_folder, f"{subject}_{today_date}_attendance.csv")
                     # Initialize the subject attendance file if it doesn't exist
                     if not os.path.exists(subject_attendance_file):
                         with open(subject_attendance_file, 'w', newline='') as subject_file:
                             writer = csv.writer(subject_file)
                             writer.writerow(['Name', 'Time', 'Confidence', 'Method'])
-                    
-                    # Mark attendance for the subject
-                    if student_name != "Unknown" and student_name not in self.attendance_marked:
+                    # Check if attendance already marked for this student in this subject today
+                    already_marked = False
+                    with open(subject_attendance_file, 'r') as subject_file:
+                        reader = csv.DictReader(subject_file)
+                        for row in reader:
+                            if row['Name'] == student_name:
+                                already_marked = True
+                                break
+                    if not already_marked and student_name != "Unknown":
                         with open(subject_attendance_file, 'a', newline='') as subject_file:
                             writer = csv.writer(subject_file)
                             writer.writerow([student_name, datetime.now().strftime("%H:%M:%S"), f"{confidence:.2f}%", method])
-                        self.attendance_marked.add(student_name)
                         print(f"Marked attendance for {student_name} in {subject} at {current_time} (Confidence: {confidence:.2f}%, Method: {method})")
+                    """else:
+                        if already_marked:
+                            print(f"Attendance already marked for {student_name} in {subject} today.")"""
                     return  # Exit after marking attendance for the current subject
-        
         print(f"No active subject found for the current time: {current_time}")
     
     def get_student_name(self, student_id):
@@ -661,7 +696,33 @@ class EnhancedAttendanceSystem:
             # Update tracked face position
             self.tracked_faces[tracker_id]['box'] = (x, y, w, h)
             self.tracked_faces[tracker_id]['frame_count'] += 1
-            
+
+            # --- NEW: Periodically re-run recognition on tracked face ---
+            # Extract the current face region
+            gray_face = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)[y:y+h, x:x+w]
+            if gray_face.shape[0] > 0 and gray_face.shape[1] > 0:
+                aligned_face = self.align_face(gray_face, cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), x, y, w, h)
+                normalized_face = self.normalize_lighting(aligned_face)
+                resized_face = cv2.resize(normalized_face, (100, 100))
+                student_id, confidence, method = self.ensemble_prediction(normalized_face, resized_face)
+                student_name = self.get_student_name(student_id)
+                if self.deep_learning_available:
+                    dl_name, dl_confidence, dl_method = self.recognize_with_deep_learning(frame, (x, y, w, h))
+                    if dl_confidence > confidence and dl_confidence > self.recognition_threshold:
+                        student_name = dl_name
+                        confidence = dl_confidence
+                        method = dl_method
+                display_name = student_name if confidence >= 40 else "Unknown"
+                display_method = method if confidence >= 40 else method + "+LowConf"
+                # Only update if confidence is higher or crosses threshold
+                prev_conf = self.tracked_faces[tracker_id]['confidence']
+                prev_name = self.tracked_faces[tracker_id]['name']
+                if (confidence > prev_conf) or (prev_conf < 40 and confidence >= 40) or (prev_name == "Unknown" and display_name != "Unknown"):
+                    self.tracked_faces[tracker_id]['name'] = display_name
+                    self.tracked_faces[tracker_id]['confidence'] = confidence
+                    self.tracked_faces[tracker_id]['method'] = display_method
+            # --- END NEW ---
+
             # Draw tracking box
             cv2.rectangle(frame, (x, y), (x+w, y+h), (255, 0, 0), 2)
             
@@ -727,16 +788,17 @@ class EnhancedAttendanceSystem:
                 # Use ensemble of traditional recognizers
                 student_id, confidence, method = self.ensemble_prediction(normalized_face, resized_face)
                 student_name = self.get_student_name(student_id)
-                
                 # If available, also try deep learning recognition
                 if self.deep_learning_available:
                     dl_name, dl_confidence, dl_method = self.recognize_with_deep_learning(frame, (x, y, w, h))
-                    
                     # If deep learning got a good match, use it instead
                     if dl_confidence > confidence and dl_confidence > self.recognition_threshold:
                         student_name = dl_name
                         confidence = dl_confidence
                         method = dl_method
+                # Only set label to Unknown if confidence < 40, but always calculate match
+                display_name = student_name if confidence >= 40 else "Unknown"
+                display_method = method if confidence >= 40 else method + "+LowConf"
                 
                 # Create a new tracker (using KCF tracker)
                 # Use a compatible tracker based on OpenCV version
@@ -758,9 +820,9 @@ class EnhancedAttendanceSystem:
                 self.trackers[tracker_id] = tracker
                 self.tracked_faces[tracker_id] = {
                     'box': (x, y, w, h),
-                    'name': student_name,
+                    'name': display_name,
                     'confidence': confidence,
-                    'method': method,
+                    'method': display_method,
                     'frame_count': 0
                 }
                 
@@ -768,7 +830,7 @@ class EnhancedAttendanceSystem:
                 cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 
                 # Display recognition results
-                display_text = f"{student_name} ({confidence:.1f}%)"
+                display_text = f"{display_name} ({confidence:.1f}%)"
                 cv2.putText(frame, display_text, (x, y-10), 
                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
     
@@ -804,6 +866,7 @@ class EnhancedAttendanceSystem:
         print("Starting attendance system. Press 'q' to quit.")
         
         frame_count = 0
+        last_email_time = 0
         
         while True:
             # Capture frame from webcam
@@ -833,6 +896,16 @@ class EnhancedAttendanceSystem:
             
             # Display the frame
             cv2.imshow('Attendance System', frame)
+            
+            # TEST: Send attendance email every minute
+            """current_time = time.time()
+            if current_time - last_email_time > 60:
+                print("[TEST] Sending attendance email (test mode, every minute)...")
+                self.check_and_send_attendance()
+                last_email_time = current_time"""
+            
+            # Check for end of lecture and send attendance
+            self.check_and_send_attendance()
             
             # Check for exit key
             if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -898,21 +971,17 @@ class EnhancedAttendanceSystem:
                     # Use ensemble prediction
                     student_id, confidence, method = self.ensemble_prediction(normalized_face, resized_face)
                     student_name = self.get_student_name(student_id)
-                    
-                    # Try deep learning if available
                     if self.deep_learning_available:
                         dl_name, dl_confidence, dl_method = self.recognize_with_deep_learning(frame, (x, y, w, h))
-                        
-                        # If deep learning got a good match, use it
                         if dl_confidence > confidence and dl_confidence > self.recognition_threshold:
                             student_name = dl_name
                             confidence = dl_confidence
                             method = dl_method
-                    
-                    # If confidence is high enough, mark attendance
+                    display_name = student_name if confidence >= 40 else "Unknown"
+                    display_method = method if confidence >= 40 else method + "+LowConf"
                     if confidence > self.recognition_threshold:
-                        self.mark_attendance(student_name, confidence, method)
-                        display_text = f"{student_name} ({confidence:.1f}%, {method})"
+                        self.mark_attendance(display_name, confidence, display_method)
+                        display_text = f"{display_name} ({confidence:.1f}%, {display_method})"
                     else:
                         display_text = f"Unknown ({confidence:.1f}%)"
                     
@@ -926,6 +995,41 @@ class EnhancedAttendanceSystem:
         
         cv2.destroyAllWindows()
         print("\nOffline processing complete!")
+    
+    def check_and_send_attendance(self):
+        """Check if any lecture just ended and send attendance as Excel to the subject's email."""
+        timetable_file = "timetable.csv"
+        if not os.path.exists(timetable_file):
+            return
+        current_time = datetime.now().strftime("%H:%M")
+        today_date = datetime.now().strftime("%Y-%m-%d")
+        with open(timetable_file, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                end_time = row['end_time']
+                subject = row['subject']
+                email = row.get('email', None)
+                """if not email:
+                    continue
+                
+                csv_path = os.path.join(self.attendance_folder, f"{subject}_{today_date}_attendance.csv")
+                excel_path = csv_path.replace('.csv', '.xlsx')
+                if os.path.exists(csv_path):
+                    csv_to_excel(csv_path, excel_path)
+                    send_email_with_attachment(email, f"Attendance for {subject} on {today_date}",
+                                              f"Please find attached the attendance sheet for {subject} on {today_date}.",
+                                              excel_path)
+                # If the current time matches the end_time (within 1 minute)
+                """
+                if current_time == end_time:
+                    csv_path = os.path.join(self.attendance_folder, f"{subject}_{today_date}_attendance.csv")
+                    excel_path = csv_path.replace('.csv', '.xlsx')
+                    if os.path.exists(csv_path):
+                        self.csv_to_excel(csv_path, excel_path)
+                        self.send_email_with_attachment(email, f"Attendance for {subject} on {today_date}",
+                                                      f"Please find attached the attendance sheet for {subject} on {today_date}.",
+                                                      excel_path)
+
 
 def setup_instructions():
     """Print setup instructions for first-time usage."""
@@ -954,6 +1058,7 @@ def test_webcam():
             cap.release()
     print("No working webcam found.")
     return False
+
 
 if __name__ == "__main__":
     # First, test webcam access

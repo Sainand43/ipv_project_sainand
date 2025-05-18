@@ -12,7 +12,7 @@ os.makedirs(STUDENTS_FOLDER, exist_ok=True)
 os.makedirs(TEST_IMAGES_FOLDER, exist_ok=True)
 
 def capture_images(first_name, last_name):
-    """Capture 20-25 images of the student and save them."""
+    """Capture 20-25 images of the student and save only the cropped face region."""
     student_name = f"{first_name}_{last_name}"
     student_id = len(os.listdir(STUDENTS_FOLDER)) + 1  # Assign a new ID based on the number of students
     print(f"Assigned ID: {student_id} for {student_name}")
@@ -31,14 +31,26 @@ def capture_images(first_name, last_name):
             print("Failed to capture frame.")
             break
 
-        # Save the image
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.3, minNeighbors=5)
+        if len(faces) == 0:
+            print("No face detected, skipping this frame.")
+            cv2.imshow("Capturing Images - Press 'q' to Quit", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+            continue
+        # Use the largest face detected
+        x, y, w, h = max(faces, key=lambda rect: rect[2]*rect[3])
+        face_img = frame[y:y+h, x:x+w]
         file_name = f"{student_name}{count + 1}.jpg"
-        cv2.imwrite(os.path.join(STUDENTS_FOLDER, file_name), frame)
-        cv2.imwrite(os.path.join(TEST_IMAGES_FOLDER, file_name), frame)
+        cv2.imwrite(os.path.join(STUDENTS_FOLDER, file_name), face_img)
+        cv2.imwrite(os.path.join(TEST_IMAGES_FOLDER, file_name), face_img)
         count += 1
-        # Display the frame
-        cv2.imshow("Capturing Images - Press 'q' to Quit", frame)
-        show_frame_in_tkinter(frame)
+        # Display the frame with a rectangle around the detected face
+        display_frame = frame.copy()
+        cv2.rectangle(display_frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+        cv2.imshow("Capturing Images - Press 'q' to Quit", display_frame)
         # Exit if 'q' is pressed
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
